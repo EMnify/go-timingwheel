@@ -6,7 +6,7 @@ import (
 	"time"
 	"unsafe"
 
-	"github.com/RussellLuo/timingwheel/delayqueue"
+	"github.com/EMnify/go-timingwheel/delayqueue"
 )
 
 // TimingWheel is an implementation of Hierarchical Timing Wheels.
@@ -26,10 +26,14 @@ type TimingWheel struct {
 
 	exitC     chan struct{}
 	waitGroup waitGroupWrapper
+
+	executor func(func())
 }
 
+type Option func(*TimingWheel)
+
 // NewTimingWheel creates an instance of TimingWheel with the given tick and wheelSize.
-func NewTimingWheel(tick time.Duration, wheelSize int64) *TimingWheel {
+func NewTimingWheel(tick time.Duration, wheelSize int64, options ...Option) *TimingWheel {
 	tickMs := int64(tick / time.Millisecond)
 	if tickMs <= 0 {
 		panic(errors.New("tick must be greater than or equal to 1ms"))
@@ -37,16 +41,21 @@ func NewTimingWheel(tick time.Duration, wheelSize int64) *TimingWheel {
 
 	startMs := timeToMs(time.Now().UTC())
 
-	return newTimingWheel(
+	tw := newTimingWheel(
 		tickMs,
 		wheelSize,
 		startMs,
 		delayqueue.New(int(wheelSize)),
+		nil,
 	)
+	for _, option := range options {
+		option(tw)
+	}
+	return tw
 }
 
 // newTimingWheel is an internal helper function that really creates an instance of TimingWheel.
-func newTimingWheel(tickMs int64, wheelSize int64, startMs int64, queue *delayqueue.DelayQueue) *TimingWheel {
+func newTimingWheel(tickMs int64, wheelSize int64, startMs int64, queue *delayqueue.DelayQueue, executor func(func())) *TimingWheel {
 	buckets := make([]*bucket, wheelSize)
 	for i := range buckets {
 		buckets[i] = newBucket()
@@ -59,6 +68,13 @@ func newTimingWheel(tickMs int64, wheelSize int64, startMs int64, queue *delayqu
 		buckets:     buckets,
 		queue:       queue,
 		exitC:       make(chan struct{}),
+		executor:    executor,
+	}
+}
+
+func WithExecutor(executor func(func())) Option {
+	return func(tw *TimingWheel) {
+		tw.executor = executor
 	}
 }
 
@@ -98,6 +114,7 @@ func (tw *TimingWheel) add(t *Timer) bool {
 					tw.wheelSize,
 					currentTime,
 					tw.queue,
+					tw.executor,
 				)),
 			)
 			overflowWheel = atomic.LoadPointer(&tw.overflowWheel)
@@ -114,7 +131,11 @@ func (tw *TimingWheel) addOrRun(t *Timer) {
 
 		// Like the standard time.AfterFunc (https://golang.org/pkg/time/#AfterFunc),
 		// always execute the timer's task in its own goroutine.
-		go t.task()
+		if tw.executor == nil {
+			go t.task()
+		} else {
+			tw.executor(t.task)
+		}
 	}
 }
 
